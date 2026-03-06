@@ -42,7 +42,8 @@ save, confirm) in one call. No browser_snapshot needed.
 Tools: qb_list_invoices, qb_receive_payment, qb_create_invoice,
 qb_invoice_state, qb_page_state, qb_delete_line_item, qb_edit_payment_amount,
 qb_batch_receive_payments, qb_report, qb_report_pnl, qb_report_balance_sheet,
-qb_report_ar_aging, qb_report_customer_balance.
+qb_report_ar_aging, qb_report_customer_balance, qb_report_open_invoices,
+qb_report_vendor_balance.
 
 IMPORTANT: These tools connect to Chrome via CDP. Chrome must be running
 with remote debugging enabled. If connection fails, start Chrome with:
@@ -703,31 +704,50 @@ async def qb_batch_receive_payments(payments: str) -> str:
 # QBO report URLs — date_macro can be: This Month, Last Month, This Quarter,
 # Last Quarter, This Year, Last Year, This Month-to-date, This Quarter-to-date,
 # This Year-to-date, or custom (requires start_date/end_date)
-QBO_REPORT_URLS = {
-    "profit-and-loss": "/app/reports/profit-and-loss",
-    "pnl": "/app/reports/profit-and-loss",
-    "balance-sheet": "/app/reports/balance-sheet",
-    "ar-aging": "/app/reports/agedReceivables",
-    "ar-aging-detail": "/app/reports/AgedReceivableDetail",
-    "ap-aging": "/app/reports/agedPayables",
-    "customer-balance": "/app/reports/customer-balance-summary",
-    "customer-balance-detail": "/app/reports/customer-balance-detail",
-    "general-ledger": "/app/reports/general-ledger",
-    "trial-balance": "/app/reports/trial-balance",
-    "expenses-by-vendor": "/app/reports/expenses-by-vendor-summary",
-    "sales-by-customer": "/app/reports/sales-by-customer-summary",
-    "tax-summary": "/app/reports/tax-summary",
-    "cash-flow": "/app/reports/cash-flow",
-    "invoice-list": "/app/reports/invoice-list",
+# QBO report tokens — use /app/report/builder?token=TOKEN format (NOT /app/reports/)
+# rptId GUIDs are account-specific; token is universal across QBO accounts
+QBO_REPORT_TOKENS = {
+    "profit-and-loss": "PANDL",
+    "pnl": "PANDL",
+    "balance-sheet": "BAL_SHEET",
+    "balance-sheet-detail": "BAL_SHEET_DET",
+    "balance-sheet-summary": "BAL_SHEET_SUM",
+    "ar-aging": "AR_AGING",
+    "ar-aging-detail": "AR_AGING_DET",
+    "ap-aging": "AP_AGING",
+    "ap-aging-detail": "AP_AGING_DET",
+    "customer-balance": "CUST_BAL",
+    "customer-balance-detail": "CUST_BAL_DET",
+    "general-ledger": "GEN_LEDGER",
+    "trial-balance": "TRIAL_BAL",
+    "expenses-by-vendor": "VEND_EXP",
+    "sales-by-customer": "CUST_SALES",
+    "sales-by-customer-detail": "CUST_SALES_DET",
+    "cash-flow": "CASH_FLOW",
+    "invoice-list": "INVOICE_LIST",
+    "open-invoices": "OPEN_INVOICES",
+    "pnl-by-customer": "PANDL_BYCUST",
+    "pnl-by-month": "PANDL_BY_MONTH",
+    "pnl-detail": "PANDL_DET",
+    "pnl-comparison": "PANDL_COMP",
+    "vendor-balance": "VEND_BAL",
+    "unpaid-bills": "UNPAID_BILLS",
+    "deposit-detail": "DEPOSIT_DETAIL",
+    "journal": "JOURNAL",
+    "transaction-list": "TX_LIST_BY_DATE",
+    "transaction-detail": "TX_DET_BY_ACCT",
+    "collections": "COLLECTIONS",
+    "income-by-customer": "CUST_INC",
 }
 
 REPORT_EXTRACT_JS = """() => {
-    // Extract report title
-    const titleEl = document.querySelector('[class*="ReportHeader"] h2, [data-testid="report-title"], .report-title h2');
+    // Extract report title — QBO uses h1 for report name
+    const titleEl = document.querySelector('h1');
     const title = titleEl ? titleEl.textContent.trim() : document.title;
 
-    // Extract date range
-    const dateEl = document.querySelector('[class*="ReportHeader"] [class*="date"], [data-testid="report-date-range"], .report-header .date-range');
+    // Extract date range — QBO uses h2 for date range (skip nav h2s)
+    const h2s = Array.from(document.querySelectorAll('h2'));
+    const dateEl = h2s.find(h => /\\d{4}|January|February|March|April|May|June|July|August|September|October|November|December/.test(h.textContent));
     const dateRange = dateEl ? dateEl.textContent.trim() : null;
 
     // Extract the report table(s)
@@ -811,10 +831,21 @@ REPORT_EXTRACT_JS = """() => {
 }"""
 
 
-async def navigate_to_report(page, report_path: str, date_macro: str = "",
+async def navigate_to_report(page, report_token: str, date_macro: str = "",
                               start_date: str = "", end_date: str = "") -> None:
-    """Navigate to a QBO report URL with optional date parameters."""
-    base_url = f"https://qbo.intuit.com{report_path}"
+    """Navigate to a QBO report using the token-based URL format.
+
+    QBO uses /app/report/builder?token=TOKEN (not /app/reports/).
+    Date params are added as query parameters alongside the token.
+    """
+    # First ensure we're on a QBO page (SPA routing requires being in-app)
+    current_url = page.url
+    if "qbo.intuit.com" not in current_url:
+        await page.goto("https://qbo.intuit.com/app/standardreports")
+        await asyncio.sleep(3)
+
+    # Build the report URL with token
+    base_url = f"https://qbo.intuit.com/app/report/builder?token={report_token}"
 
     params = []
     if date_macro:
@@ -824,17 +855,16 @@ async def navigate_to_report(page, report_path: str, date_macro: str = "",
     if end_date:
         params.append(f"end_date={end_date}")
 
-    url = base_url + ("?" + "&".join(params) if params else "")
+    url = base_url + ("&" + "&".join(params) if params else "")
     await page.goto(url)
 
-    # Wait for report to render — look for table or report content
+    # Wait for report to render — QBO reports use standard <table> elements
     try:
-        await page.wait_for_selector("table tbody tr, [class*='ReportRow'], [role='row']",
+        await page.wait_for_selector("table tbody tr, h1",
                                       timeout=20000)
     except Exception:
-        # Some reports take longer or use different selectors
         pass
-    await asyncio.sleep(2)  # Reports often load data async
+    await asyncio.sleep(3)  # Reports load data async after DOM renders
 
 
 # ---------------------------------------------------------------------------
@@ -854,8 +884,10 @@ async def qb_report(
         report_name: Report name. Options: profit-and-loss (or pnl), balance-sheet,
                      ar-aging, ar-aging-detail, ap-aging, customer-balance,
                      customer-balance-detail, general-ledger, trial-balance,
-                     expenses-by-vendor, sales-by-customer, tax-summary,
-                     cash-flow, invoice-list
+                     expenses-by-vendor, sales-by-customer, cash-flow,
+                     invoice-list, open-invoices, pnl-by-customer, pnl-by-month,
+                     pnl-detail, vendor-balance, unpaid-bills, deposit-detail,
+                     journal, transaction-list, collections, income-by-customer
         date_macro: Date range preset — This Month, Last Month, This Quarter,
                     Last Quarter, This Year, Last Year, This Year-to-date, etc.
                     Ignored if start_date/end_date are provided.
@@ -865,14 +897,14 @@ async def qb_report(
     Returns: Report title, date range, headers, and row data as JSON."""
     page = await get_page()
 
-    report_path = QBO_REPORT_URLS.get(report_name.lower())
-    if not report_path:
-        available = ", ".join(sorted(QBO_REPORT_URLS.keys()))
+    report_token = QBO_REPORT_TOKENS.get(report_name.lower())
+    if not report_token:
+        available = ", ".join(sorted(QBO_REPORT_TOKENS.keys()))
         return json.dumps({"error": f"Unknown report '{report_name}'. Available: {available}"})
 
     try:
         effective_macro = "" if (start_date and end_date) else date_macro
-        await navigate_to_report(page, report_path, effective_macro, start_date, end_date)
+        await navigate_to_report(page, report_token, effective_macro, start_date, end_date)
         result = await page.evaluate(REPORT_EXTRACT_JS)
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -888,7 +920,7 @@ async def qb_report_pnl(date_macro: str = "This Month") -> str:
                     This Year, Last Year, This Year-to-date
 
     Returns: Income, expenses, and net income broken down by account."""
-    return await qb_report("profit-and-loss", date_macro=date_macro)
+    return await qb_report("pnl", date_macro=date_macro)
 
 
 @mcp.tool()
@@ -919,6 +951,22 @@ async def qb_report_customer_balance() -> str:
     Returns: Total outstanding balance per customer.
     Use this to quickly see who owes what."""
     return await qb_report("customer-balance", date_macro="")
+
+
+@mcp.tool()
+async def qb_report_open_invoices() -> str:
+    """Get Open Invoices report.
+
+    Returns: All unpaid invoices with customer, date, due date, and balance."""
+    return await qb_report("open-invoices", date_macro="")
+
+
+@mcp.tool()
+async def qb_report_vendor_balance() -> str:
+    """Get Vendor Balance Summary report.
+
+    Returns: Total outstanding balance owed to each vendor."""
+    return await qb_report("vendor-balance", date_macro="")
 
 
 # ---------------------------------------------------------------------------

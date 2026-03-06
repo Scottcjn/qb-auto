@@ -16,11 +16,13 @@ Replaces 50K-token `browser_snapshot` round-trips with targeted DOM extraction (
 | `qb_delete_line_item` | Delete a line from an existing invoice |
 | `qb_edit_payment_amount` | Edit an existing payment amount |
 | `qb_batch_receive_payments` | Record multiple payments in sequence |
-| `qb_report` | Run any QBO report with date range options |
+| `qb_report` | Run any QBO report (30+ report types) with date range options |
 | `qb_report_pnl` | Profit & Loss (income statement) |
 | `qb_report_balance_sheet` | Balance Sheet (assets, liabilities, equity) |
 | `qb_report_ar_aging` | A/R Aging Summary (who owes, how overdue) |
 | `qb_report_customer_balance` | Customer Balance Summary |
+| `qb_report_open_invoices` | Open (unpaid) Invoices |
+| `qb_report_vendor_balance` | Vendor Balance Summary |
 
 ## Token Savings
 
@@ -75,7 +77,7 @@ The server connects to Chrome via CDP (Chrome DevTools Protocol) on port 9222 by
 
 | File | Purpose |
 |------|---------|
-| `server.py` | MCP server with 13 tools |
+| `server.py` | MCP server with 15 tools |
 | `extractors.js` | Standalone JS extractor functions (reference) |
 | `actions.js` | Playwright action templates (reference) |
 | `PLAYBOOK.md` | Quick reference for manual browser automation |

@@ -183,9 +183,10 @@ const invoiceFormState = () => {
 // Use: After navigating to any QBO report page
 // ============================================================
 const reportExtract = () => {
-  const titleEl = document.querySelector('[class*="ReportHeader"] h2, [data-testid="report-title"], .report-title h2');
+  const titleEl = document.querySelector('h1');
   const title = titleEl ? titleEl.textContent.trim() : document.title;
-  const dateEl = document.querySelector('[class*="ReportHeader"] [class*="date"], [data-testid="report-date-range"]');
+  const h2s = Array.from(document.querySelectorAll('h2'));
+  const dateEl = h2s.find(h => /\d{4}|January|February|March|April|May|June|July|August|September|October|November|December/.test(h.textContent));
   const dateRange = dateEl ? dateEl.textContent.trim() : null;
   const tables = document.querySelectorAll('table');
   const sections = [];
