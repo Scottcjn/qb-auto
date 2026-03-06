@@ -179,7 +179,39 @@ const invoiceFormState = () => {
 };
 
 // ============================================================
-// 5. POST-SAVE VERIFICATION (~30 tokens output)
+// 5. REPORT EXTRACTOR (~50-500 tokens depending on report)
+// Use: After navigating to any QBO report page
+// ============================================================
+const reportExtract = () => {
+  const titleEl = document.querySelector('[class*="ReportHeader"] h2, [data-testid="report-title"], .report-title h2');
+  const title = titleEl ? titleEl.textContent.trim() : document.title;
+  const dateEl = document.querySelector('[class*="ReportHeader"] [class*="date"], [data-testid="report-date-range"]');
+  const dateRange = dateEl ? dateEl.textContent.trim() : null;
+  const tables = document.querySelectorAll('table');
+  const sections = [];
+  tables.forEach(table => {
+    const headers = [];
+    const headerRow = table.querySelector('thead tr');
+    if (headerRow) headerRow.querySelectorAll('th').forEach(th => headers.push(th.textContent.trim()));
+    const rows = [];
+    table.querySelectorAll('tbody tr').forEach(r => {
+      const cells = [];
+      r.querySelectorAll('td').forEach(td => cells.push(td.textContent.trim()));
+      if (cells.length > 0 && cells.some(c => c !== '')) rows.push({ cells, isTotal: r.textContent.includes('Total') });
+    });
+    const footer = [];
+    table.querySelectorAll('tfoot tr').forEach(r => {
+      const cells = [];
+      r.querySelectorAll('td, th').forEach(td => cells.push(td.textContent.trim()));
+      if (cells.length > 0) footer.push(cells);
+    });
+    if (rows.length > 0) sections.push({ headers, rows: rows.slice(0, 200), footer, rowCount: rows.length });
+  });
+  return { title, dateRange, sections, sectionCount: sections.length, url: location.pathname };
+};
+
+// ============================================================
+// 6. POST-SAVE VERIFICATION (~30 tokens output)
 // Use: After clicking save to verify success
 // ============================================================
 const postSaveCheck = () => {

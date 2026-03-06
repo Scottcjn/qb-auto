@@ -40,7 +40,9 @@ and payment operations. Each tool handles an entire workflow (navigate, fill,
 save, confirm) in one call. No browser_snapshot needed.
 
 Tools: qb_list_invoices, qb_receive_payment, qb_create_invoice,
-qb_invoice_state, qb_page_state, qb_delete_line_item, qb_edit_payment_amount.
+qb_invoice_state, qb_page_state, qb_delete_line_item, qb_edit_payment_amount,
+qb_batch_receive_payments, qb_report, qb_report_pnl, qb_report_balance_sheet,
+qb_report_ar_aging, qb_report_customer_balance.
 
 IMPORTANT: These tools connect to Chrome via CDP. Chrome must be running
 with remote debugging enabled. If connection fails, start Chrome with:
@@ -692,6 +694,231 @@ async def qb_batch_receive_payments(payments: str) -> str:
         "total": len(items),
         "succeeded": sum(1 for r in results if r.get("success")),
     }, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Report Extractors
+# ---------------------------------------------------------------------------
+
+# QBO report URLs — date_macro can be: This Month, Last Month, This Quarter,
+# Last Quarter, This Year, Last Year, This Month-to-date, This Quarter-to-date,
+# This Year-to-date, or custom (requires start_date/end_date)
+QBO_REPORT_URLS = {
+    "profit-and-loss": "/app/reports/profit-and-loss",
+    "pnl": "/app/reports/profit-and-loss",
+    "balance-sheet": "/app/reports/balance-sheet",
+    "ar-aging": "/app/reports/agedReceivables",
+    "ar-aging-detail": "/app/reports/AgedReceivableDetail",
+    "ap-aging": "/app/reports/agedPayables",
+    "customer-balance": "/app/reports/customer-balance-summary",
+    "customer-balance-detail": "/app/reports/customer-balance-detail",
+    "general-ledger": "/app/reports/general-ledger",
+    "trial-balance": "/app/reports/trial-balance",
+    "expenses-by-vendor": "/app/reports/expenses-by-vendor-summary",
+    "sales-by-customer": "/app/reports/sales-by-customer-summary",
+    "tax-summary": "/app/reports/tax-summary",
+    "cash-flow": "/app/reports/cash-flow",
+    "invoice-list": "/app/reports/invoice-list",
+}
+
+REPORT_EXTRACT_JS = """() => {
+    // Extract report title
+    const titleEl = document.querySelector('[class*="ReportHeader"] h2, [data-testid="report-title"], .report-title h2');
+    const title = titleEl ? titleEl.textContent.trim() : document.title;
+
+    // Extract date range
+    const dateEl = document.querySelector('[class*="ReportHeader"] [class*="date"], [data-testid="report-date-range"], .report-header .date-range');
+    const dateRange = dateEl ? dateEl.textContent.trim() : null;
+
+    // Extract the report table(s)
+    const tables = document.querySelectorAll('table');
+    const sections = [];
+
+    tables.forEach((table, ti) => {
+        const headers = [];
+        const headerRow = table.querySelector('thead tr');
+        if (headerRow) {
+            headerRow.querySelectorAll('th').forEach(th => {
+                headers.push(th.textContent.trim());
+            });
+        }
+
+        const rows = [];
+        table.querySelectorAll('tbody tr').forEach(r => {
+            const cells = [];
+            const isTotal = r.classList.contains('total') ||
+                           r.querySelector('[class*="total"], [class*="Total"]') !== null ||
+                           r.textContent.includes('Total');
+            const indent = r.querySelector('td')?.style?.paddingLeft || '0';
+
+            r.querySelectorAll('td').forEach(td => {
+                cells.push(td.textContent.trim());
+            });
+
+            if (cells.length > 0 && cells.some(c => c !== '')) {
+                rows.push({
+                    cells: cells,
+                    isTotal: isTotal,
+                    depth: parseInt(indent) > 0 ? Math.round(parseInt(indent) / 20) : 0
+                });
+            }
+        });
+
+        // Footer/totals
+        const footerRows = [];
+        table.querySelectorAll('tfoot tr').forEach(r => {
+            const cells = [];
+            r.querySelectorAll('td, th').forEach(td => {
+                cells.push(td.textContent.trim());
+            });
+            if (cells.length > 0) footerRows.push(cells);
+        });
+
+        if (rows.length > 0 || footerRows.length > 0) {
+            sections.push({
+                headers: headers,
+                rows: rows.slice(0, 200),  // Cap at 200 rows per table
+                footer: footerRows,
+                rowCount: rows.length
+            });
+        }
+    });
+
+    // Fallback: if no tables, try to extract from the report grid/div structure
+    if (sections.length === 0) {
+        const gridRows = document.querySelectorAll('[class*="ReportRow"], [class*="report-row"], [role="row"]');
+        const fallbackRows = [];
+        gridRows.forEach(r => {
+            const cells = [];
+            r.querySelectorAll('[role="cell"], [class*="cell"], [class*="Cell"], span, div > span').forEach(c => {
+                const text = c.textContent.trim();
+                if (text) cells.push(text);
+            });
+            if (cells.length > 0) fallbackRows.push({ cells: cells, isTotal: false, depth: 0 });
+        });
+        if (fallbackRows.length > 0) {
+            sections.push({ headers: [], rows: fallbackRows.slice(0, 200), footer: [], rowCount: fallbackRows.length });
+        }
+    }
+
+    return {
+        title: title,
+        dateRange: dateRange,
+        sections: sections,
+        sectionCount: sections.length,
+        url: location.pathname + location.search
+    };
+}"""
+
+
+async def navigate_to_report(page, report_path: str, date_macro: str = "",
+                              start_date: str = "", end_date: str = "") -> None:
+    """Navigate to a QBO report URL with optional date parameters."""
+    base_url = f"https://qbo.intuit.com{report_path}"
+
+    params = []
+    if date_macro:
+        params.append(f"date_macro={date_macro.replace(' ', '%20')}")
+    if start_date:
+        params.append(f"start_date={start_date}")
+    if end_date:
+        params.append(f"end_date={end_date}")
+
+    url = base_url + ("?" + "&".join(params) if params else "")
+    await page.goto(url)
+
+    # Wait for report to render — look for table or report content
+    try:
+        await page.wait_for_selector("table tbody tr, [class*='ReportRow'], [role='row']",
+                                      timeout=20000)
+    except Exception:
+        # Some reports take longer or use different selectors
+        pass
+    await asyncio.sleep(2)  # Reports often load data async
+
+
+# ---------------------------------------------------------------------------
+# Report Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def qb_report(
+    report_name: str,
+    date_macro: str = "This Month",
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
+    """Run any QuickBooks report and extract its data as structured JSON.
+
+    Args:
+        report_name: Report name. Options: profit-and-loss (or pnl), balance-sheet,
+                     ar-aging, ar-aging-detail, ap-aging, customer-balance,
+                     customer-balance-detail, general-ledger, trial-balance,
+                     expenses-by-vendor, sales-by-customer, tax-summary,
+                     cash-flow, invoice-list
+        date_macro: Date range preset — This Month, Last Month, This Quarter,
+                    Last Quarter, This Year, Last Year, This Year-to-date, etc.
+                    Ignored if start_date/end_date are provided.
+        start_date: Custom start date MM/DD/YYYY (overrides date_macro)
+        end_date: Custom end date MM/DD/YYYY (overrides date_macro)
+
+    Returns: Report title, date range, headers, and row data as JSON."""
+    page = await get_page()
+
+    report_path = QBO_REPORT_URLS.get(report_name.lower())
+    if not report_path:
+        available = ", ".join(sorted(QBO_REPORT_URLS.keys()))
+        return json.dumps({"error": f"Unknown report '{report_name}'. Available: {available}"})
+
+    try:
+        effective_macro = "" if (start_date and end_date) else date_macro
+        await navigate_to_report(page, report_path, effective_macro, start_date, end_date)
+        result = await page.evaluate(REPORT_EXTRACT_JS)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+
+@mcp.tool()
+async def qb_report_pnl(date_macro: str = "This Month") -> str:
+    """Get Profit & Loss (Income Statement) report.
+
+    Args:
+        date_macro: This Month, Last Month, This Quarter, Last Quarter,
+                    This Year, Last Year, This Year-to-date
+
+    Returns: Income, expenses, and net income broken down by account."""
+    return await qb_report("profit-and-loss", date_macro=date_macro)
+
+
+@mcp.tool()
+async def qb_report_balance_sheet(date_macro: str = "This Month") -> str:
+    """Get Balance Sheet report.
+
+    Args:
+        date_macro: This Month, Last Month, This Quarter, This Year, etc.
+
+    Returns: Assets, liabilities, and equity balances."""
+    return await qb_report("balance-sheet", date_macro=date_macro)
+
+
+@mcp.tool()
+async def qb_report_ar_aging() -> str:
+    """Get Accounts Receivable Aging Summary report.
+
+    Returns: Customer balances organized by aging buckets
+    (Current, 1-30, 31-60, 61-90, 91+ days overdue).
+    Great for seeing who owes money and how overdue they are."""
+    return await qb_report("ar-aging", date_macro="")
+
+
+@mcp.tool()
+async def qb_report_customer_balance() -> str:
+    """Get Customer Balance Summary report.
+
+    Returns: Total outstanding balance per customer.
+    Use this to quickly see who owes what."""
+    return await qb_report("customer-balance", date_macro="")
 
 
 # ---------------------------------------------------------------------------
