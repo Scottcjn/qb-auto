@@ -118,6 +118,31 @@ async def get_page():
     return _page
 
 
+async def safe_click(locator, timeout: int = 10000) -> None:
+    # Modern QBO React forms intercept pointer events during re-renders;
+    # normal .click() times out finding a non-intercepted hit point. Fall back
+    # to force-click, then JS-dispatched click which bypasses hit-testing.
+    try:
+        await locator.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    try:
+        await locator.click(timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        await locator.click(force=True, timeout=3000)
+        return
+    except Exception:
+        pass
+    handle = await locator.element_handle()
+    if handle:
+        await handle.evaluate("el => el.click()")
+        return
+    raise RuntimeError("safe_click: no fallback succeeded")
+
+
 async def ensure_on_invoices(page) -> None:
     """Navigate to invoices page if not already there."""
     if "/app/invoices" not in page.url:
@@ -379,17 +404,17 @@ async def qb_create_invoice(
 
         # Set customer
         customer_combo = page.get_by_role("combobox", name=re.compile(r"Customer", re.I))
-        await customer_combo.click()
+        await safe_click(customer_combo)
         await customer_combo.fill(customer)
         await asyncio.sleep(0.5)
         customer_option = page.get_by_role("option", name=re.compile(re.escape(customer), re.I))
-        await customer_option.first.click()
+        await safe_click(customer_option.first)
         await asyncio.sleep(0.5)
 
         # Set invoice date
         if invoice_date:
             date_field = page.get_by_role("textbox", name=re.compile(r"Invoice date", re.I))
-            await date_field.click()
+            await safe_click(date_field)
             await page.keyboard.press("Control+a")
             await date_field.fill(invoice_date)
             await page.keyboard.press("Tab")
@@ -409,31 +434,31 @@ async def qb_create_invoice(
 
             # Product/service
             product_combo = page.get_by_role("combobox", name=re.compile(rf"Product or service line {line_num}"))
-            await product_combo.click()
+            await safe_click(product_combo)
             await product_combo.fill(item["product"])
             await asyncio.sleep(0.5)
             product_option = page.get_by_role("option", name=re.compile(re.escape(item["product"]), re.I))
-            await product_option.first.click()
+            await safe_click(product_option.first)
             await asyncio.sleep(0.5)
 
             # Description
             if item.get("description"):
                 desc_field = page.get_by_role("textbox", name=re.compile(rf"Description line {line_num}"))
-                await desc_field.click()
+                await safe_click(desc_field)
                 await page.keyboard.press("Control+a")
                 await desc_field.fill(item["description"])
 
             # Quantity
             if item.get("qty"):
                 qty_field = page.get_by_role("textbox", name=re.compile(rf"Qty|Quantity.*line {line_num}"))
-                await qty_field.click()
+                await safe_click(qty_field)
                 await page.keyboard.press("Control+a")
                 await qty_field.fill(str(item["qty"]))
 
             # Rate
             if item.get("rate"):
                 rate_field = page.get_by_role("textbox", name=re.compile(rf"Rate line {line_num}"))
-                await rate_field.click()
+                await safe_click(rate_field)
                 await page.keyboard.press("Control+a")
                 await rate_field.fill(str(item["rate"]))
                 await page.keyboard.press("Tab")
@@ -463,7 +488,7 @@ async def qb_create_invoice(
 
         # Save and close
         save_btn = page.get_by_role("button", name=re.compile(r"Save and close", re.I))
-        await save_btn.first.click()
+        await safe_click(save_btn.first)
         await asyncio.sleep(1.5)
 
         # Handle confirmation
@@ -696,6 +721,68 @@ async def qb_batch_receive_payments(payments: str) -> str:
         "total": len(items),
         "succeeded": sum(1 for r in results if r.get("success")),
     }, indent=2)
+
+
+@mcp.tool()
+async def qb_write_off_invoice(invoice_num: str) -> str:
+    """Write off an uncollectible invoice as bad debt.
+
+    Args:
+        invoice_num: Invoice number to write off (e.g. '6758')
+
+    Returns: success status. Creates a credit memo against the Bad Debts
+    expense account and applies it to zero out the invoice."""
+    page = await get_page()
+
+    try:
+        await ensure_on_invoices(page)
+
+        # Find invoice row and click action menu
+        row_btn = page.get_by_role("button", name=re.compile(rf"View/Edit {invoice_num}"))
+        count = await row_btn.count()
+        if count == 0:
+            return json.dumps({"success": False, "error": f"Invoice {invoice_num} not found in list."})
+
+        await row_btn.click()
+        await asyncio.sleep(0.3)
+
+        # Look for "Write off" in the dropdown
+        writeoff_btn = page.get_by_role("button", name=re.compile(r"Write off", re.I))
+        wo_count = await writeoff_btn.count()
+        if wo_count == 0:
+            # Try via More actions or the invoice view
+            return json.dumps({"success": False, "error": "No 'Write off' option in action menu. May need to open invoice first."})
+
+        await writeoff_btn.first.click()
+        await page.wait_for_selector('[role="dialog"]', timeout=10000)
+        await asyncio.sleep(1)
+
+        # Save/confirm the write-off
+        save_btn = page.get_by_role("button", name=re.compile(r"^(Save|Write off|OK)$", re.I))
+        await save_btn.first.click()
+        await asyncio.sleep(1)
+
+        # Handle confirmation
+        try:
+            confirm_btn = page.get_by_role("button", name=re.compile(r"^Yes$", re.I))
+            await confirm_btn.click(timeout=3000)
+            await asyncio.sleep(1)
+        except Exception:
+            pass
+
+        await asyncio.sleep(1.5)
+        toast_el = await page.query_selector('[role="alert"]')
+        toast_text = await toast_el.text_content() if toast_el else None
+
+        return json.dumps({
+            "success": True,
+            "invoice": invoice_num,
+            "action": "written_off",
+            "toast": (toast_text or "").strip()[:200],
+        })
+
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)[:300]})
 
 
 # ---------------------------------------------------------------------------
