@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // QuickBooks Online Action Sequences for browser_run_code
 // Each function is a complete Playwright workflow in ONE tool call
 // Usage: Copy the async (page) => { ... } into browser_run_code({ code: "..." })

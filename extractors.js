@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // QuickBooks Online Extractors for browser_evaluate
 // Each function returns compact JSON instead of 50K+ accessibility snapshots
 // Usage: Copy the function body into browser_evaluate({ function: "..." })

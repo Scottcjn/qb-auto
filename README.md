@@ -1,3 +1,5 @@
+[![BCOS Certified](https://img.shields.io/badge/BCOS-Certified-brightgreen?style=flat)](BCOS.md)
+
 # qb-auto — QuickBooks MCP Server
 
 MCP (Model Context Protocol) server that gives Claude Code native tools for QuickBooks Online automation.
@@ -94,4 +96,4 @@ No browser snapshots. No 50K token pages. One tool call = one complete operation
 
 ## License
 
-MIT
+MIT

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 QuickBooks Online MCP Server — High-level QB automation tools for Claude Code.
 
