@@ -30,8 +30,12 @@ const receivePayment = async (page) => {
 
   // Find and click the invoice row action area
   // QB row buttons: "View/Edit {NUM} Receive payment More actions"
+  // The "/" has to be escaped: Playwright serializes a RegExp passed to `name`
+  // into an internal selector `button[name=/<pattern>/]` and does not escape
+  // "/" itself, so a bare one closes that literal early and the selector fails
+  // to parse. The trailing (?!\d) stops "685" from matching invoice 6850's row.
   const rowBtn = page.getByRole('button', {
-    name: new RegExp(`View/Edit ${INVOICE_NUM}`)
+    name: new RegExp(`View\\/Edit ${INVOICE_NUM}(?!\\d)`)
   });
   await rowBtn.click();
   await page.waitForTimeout(300);
