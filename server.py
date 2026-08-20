@@ -27,7 +27,12 @@ import os
 import re
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+try:
+    # mcp>=2.0.0 dropped mcp.server.fastmcp; FastMCP moved to mcp.server.mcpserver
+    # and was renamed MCPServer, keeping the same tool()/run() API.
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:
+    from mcp.server.fastmcp import FastMCP
 
 # ---------------------------------------------------------------------------
 # MCP Server
