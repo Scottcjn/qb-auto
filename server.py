@@ -237,6 +237,48 @@ INVOICE_FORM_JS = """() => {
 
 
 # ---------------------------------------------------------------------------
+# Transaction targeting
+# ---------------------------------------------------------------------------
+
+def txn_name_pattern(prefix: str, number: str):
+    """Accessible-name pattern for a row/search-result button of one transaction.
+
+    Two rules are baked in here, because both were getting broken at the call
+    sites and both put the wrong transaction under a money operation:
+
+    1. No bare "/" in the pattern. Playwright turns a regex passed to
+       ``name=`` into an internal selector ``button[name=/<pattern>/]`` and
+       escapes only quotes and ">>" (``_str_utils.escape_regex_for_selector``).
+       A bare "/" closes that literal early, so ``View/Edit 6850`` becomes the
+       unparsable ``button[name=/View/Edit 6850/]`` and every query against it
+       raises InvalidSelectorError before the page is even consulted.
+    2. The number must not match as a bare substring. QBO lists whole invoice
+       numbers, so "685" also matches the button of invoice 6850 -- one digit
+       short in the argument and the payment lands on someone else's invoice.
+       The trailing lookahead pins the match to the end of the number.
+    """
+    body = rf"{prefix}\s+{re.escape(number)}(?!\d)"
+    return re.compile(body.replace("/", r"\/"))
+
+
+async def resolve_txn_button(page, prefix: str, number: str, label: str):
+    """Locate exactly one transaction button, or explain why we will not act.
+
+    Returns (locator, None) on a unique hit and (None, error_message) otherwise.
+    An ambiguous match is refused rather than resolved with ``.first``: these
+    tools record payments and write-offs, so acting on an arbitrary one of
+    several candidates is worse than doing nothing.
+    """
+    locator = page.get_by_role("button", name=txn_name_pattern(prefix, number))
+    count = await locator.count()
+    if count == 0:
+        return None, f"{label} {number} not found in list. May need to scroll or change filters."
+    if count > 1:
+        return None, f"{label} {number} matches {count} rows — refusing to act on an ambiguous match."
+    return locator, None
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -304,10 +346,9 @@ async def qb_receive_payment(
 
     try:
         # Find invoice row and click action button
-        row_btn = page.get_by_role("button", name=re.compile(rf"View/Edit {invoice_num}"))
-        count = await row_btn.count()
-        if count == 0:
-            return json.dumps({"success": False, "error": f"Invoice {invoice_num} not found in list. May need to scroll or change filters."})
+        row_btn, error = await resolve_txn_button(page, "View/Edit", invoice_num, "Invoice")
+        if error:
+            return json.dumps({"success": False, "error": error})
 
         await row_btn.click()
         await asyncio.sleep(0.3)
@@ -538,8 +579,10 @@ async def qb_delete_line_item(invoice_num: str, line_number: int) -> str:
         await search.click()
         await asyncio.sleep(0.5)
 
-        recent_btn = page.get_by_role("button", name=re.compile(rf"Invoice {invoice_num}"))
-        await recent_btn.first.click()
+        recent_btn, error = await resolve_txn_button(page, "Invoice", invoice_num, "Invoice")
+        if error:
+            return json.dumps({"success": False, "error": error})
+        await recent_btn.click()
         await page.wait_for_selector('[role="dialog"]', timeout=10000)
         await asyncio.sleep(1)
 
@@ -656,10 +699,9 @@ async def qb_batch_receive_payments(payments: str) -> str:
             await ensure_on_invoices(page)
             await asyncio.sleep(0.5)
 
-            row_btn = page.get_by_role("button", name=re.compile(rf"View/Edit {inv}"))
-            count = await row_btn.count()
-            if count == 0:
-                results.append({"invoice": inv, "success": False, "error": "Not found in list"})
+            row_btn, error = await resolve_txn_button(page, "View/Edit", inv, "Invoice")
+            if error:
+                results.append({"invoice": inv, "success": False, "error": error})
                 continue
 
             await row_btn.click()
@@ -743,10 +785,9 @@ async def qb_write_off_invoice(invoice_num: str) -> str:
         await ensure_on_invoices(page)
 
         # Find invoice row and click action menu
-        row_btn = page.get_by_role("button", name=re.compile(rf"View/Edit {invoice_num}"))
-        count = await row_btn.count()
-        if count == 0:
-            return json.dumps({"success": False, "error": f"Invoice {invoice_num} not found in list."})
+        row_btn, error = await resolve_txn_button(page, "View/Edit", invoice_num, "Invoice")
+        if error:
+            return json.dumps({"success": False, "error": error})
 
         await row_btn.click()
         await asyncio.sleep(0.3)
